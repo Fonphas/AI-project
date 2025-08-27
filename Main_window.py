@@ -1,7 +1,12 @@
 import sys
 import cv2
-from Main_Software import AI_Detection
-from ultralytics import YOLO  
+from ultralytics import YOLO 
+import torch
+print("CUDA available:", torch.cuda.is_available())
+print("CUDA device count:", torch.cuda.device_count())
+if torch.cuda.is_available():
+    print("CUDA device name:", torch.cuda.get_device_name(0))
+ 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QFileDialog, QComboBox, QLabel, QSlider,
     QSpinBox, QDialogButtonBox, QTableWidget, QTableWidgetItem, QPushButton,
@@ -15,10 +20,30 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setupUi(self)
         self.setWindowTitle("AGC - Terminal direction Detection")
+
+        self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+        print(f"Using device: {self.device}")
+
+        self.model = YOLO()  
+        self.model.to(self.device)  # push model to GPU if available
+
+        # Enable FP16 for faster inference (only works on CUDA)
+        if self.device != 'cpu':
+            self.model.model.half()
+            print("Model running in FP16 mode on GPU")
+        else:
+            print("Model running in FP32 mode on CPU")
+
+
+
         self.camera_LH = None
         self.camera_RH = None
         self.timer_LH = QTimer(self)
         self.timer_RH = QTimer(self)
+        self.cap_LH = None
+        self.cap_RH = None
+
+        
 
     def setupUi(self, MainWindow):
         MainWindow.setObjectName("Main_Window")
@@ -40,6 +65,8 @@ class MainWindow(QMainWindow):
         # Camera Label 
         self.label = QLabel(self.centralwidget)
         self.label.setGeometry(QRect(30, 380, 67, 17))
+        
+
 
         # Title Label
         #LH
@@ -51,7 +78,7 @@ class MainWindow(QMainWindow):
         
         #RH
         self.label_5 = QLabel(self.centralwidget)
-        self.label_5.setGeometry(QRect(30, 50, 161, 17))
+        self.label_5.setGeometry(QRect(445, 20, 161, 17))
         font = QFont()
         font.setPointSize(14)
         self.label_5.setFont(font)
@@ -81,7 +108,7 @@ class MainWindow(QMainWindow):
         self.buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Apply, self.centralwidget)
         self.buttonBox.setGeometry(QRect(200, 375, 68, 25))
         self.buttonBox.setCenterButtons(True)
-        self.buttonBox.clicked.connect(self.connect_camera)
+        self.buttonBox.clicked.connect(self.connect_camera) # Connect to camera when clicked
 
         # Table Widget
         self.tableWidget = QTableWidget(self.centralwidget)
@@ -98,11 +125,6 @@ class MainWindow(QMainWindow):
 
         self.label_4 = QLabel(self.centralwidget)
         self.label_4.setGeometry(QRect(490, 370, 51, 21))
-
-        # Start Button
-        self.StartButton = QPushButton(self.centralwidget)
-        self.StartButton.setGeometry(QRect(720, 370, 131, 25))
-        self.StartButton.setIcon(QIcon.fromTheme("go-next"))
 
         # Menu bar and menus
         self.menubar = QMenuBar(MainWindow)
@@ -155,6 +177,66 @@ class MainWindow(QMainWindow):
         self.video_label_LH.setAlignment(Qt.AlignCenter)
         self.video_label_LH.setText("No video feed")
 
+    def update_frame_LH(self):
+        if self.cap_LH and self.cap_LH.isOpened():
+            ret, frame = self.cap_LH.read()
+            if ret:
+                if self.comboBox.currentText() in ["USB1", "USB2"]:
+                    frame = cv2.flip(frame, 1)  # Mirror for USB cameras
+                    if self.model is not None:
+                        results = self.model.predict(frame, imgsz=640, conf=0.5, verbose=False)
+                        frame = results[0].plot()  # draw bboxes
+
+                    self.display_frame(frame, self.video_label_LH)
+            else:
+                print("Failed to read frame.")
+        else:
+            print("Fail to read frame")
+            if self.cap_LH:
+                self.cap_LH.release()
+        
+
+
+    def connect_camera(self):
+        selected = self.comboBox.currentText()
+        print("Selected Camera:", selected)
+
+        # Stop previous streams
+        self.timer_LH.stop()
+        if self.cap_LH and self.cap_LH.isOpened():
+            self.cap_LH.release()
+            self.cap_LH = None
+
+        # Disconnect previous timer to avoid multiple connections
+        #try:
+         #   self.timer_LH.timeout.disconnect()
+        #except Exception:
+         #   pass
+
+        # LH = USB1, USB2, or VDO
+        if selected == "USB1":
+            self.cap_LH = cv2.VideoCapture(1)
+        elif selected == "USB2":
+            self.cap_LH = cv2.VideoCapture(0)
+        elif selected == "VDO":
+            file_path, _ = QFileDialog.getOpenFileName()
+        if file_path:
+            print("Opening video file:", file_path)   # debug
+            self.cap_LH = cv2.VideoCapture(file_path)
+        else:
+            print("No video file selected.")
+            return
+        
+
+        if self.cap_LH and self.cap_LH.isOpened():
+            print(f"{selected} connected successfully.")
+            self.timer_LH.timeout.connect(self.update_file_video 
+                                          if selected == "VDO" else self.update_frame_LH)
+            
+            self.timer_LH.start(30)
+        else:
+            print(f"Failed to connect {selected}.")
+
         # Frame RH
         self.frame_RH = QFrame(self.centralwidget)
         self.frame_RH.setGeometry(QRect(445, 50, 410, 291))
@@ -167,61 +249,60 @@ class MainWindow(QMainWindow):
         self.video_label_RH.setAlignment(Qt.AlignCenter)
         self.video_label_RH.setText("No video feed")
 
-
         self.buttonBox.clicked.connect(self.connect_camera) #Start after click button
     
-    def connect_camera(self):
-        print("Select Mode Video")
-
-        selected = self.comboBox.currentText()
-    # LH = USB1
-        self.frame_LH = cv2.VideoCapture(1)
-        if self.frame_LH.isOpened():
-            print("LH camera connected successfully.")
-            self.timer_LH.timeout.connect(self.update_frame_LH)
-            self.timer_LH.start(30)
-    
-        else:
-            print("Failed to connect LH camera.")
-
+    def update_frame_RH(self):
+        if self.cap_RH and self.cap_RH.isOpened():
+            ret, frame = self.cap_RH.read()
+            if ret:
+                frame = cv2.flip(frame, 1)  #Mirror
+                self.display_frame(frame, self.video_label_RH)
+            else:
+                print("Failed to read frame.")
     # RH = USB2
-        self.frame_RH = cv2.VideoCapture(2)
-        if self.frame_RH.isOpened():
+    def connect_camera_RH(self):
+        selected = self.comboBox.currentText()
+        print("Select Camera", selected)
+
+        self.cap_RH = cv2.VideoCapture(0)
+        if self.cap_RH.isOpened():
             print("RH camera connected successfully.")
             self.timer_RH.timeout.connect(self.update_frame_RH)
             self.timer_RH.start(30)
         else:
             print("Failed to connect RH camera.")
-            
-        if selected == "VDO":
-            print("Select video file")
-            file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select video file", "", "Video Files (*.mp4 *.avi *.mov *.mkv);;All Files (*)"
-            )
 
-        if file_path:
-           self.camera = cv2.VideoCapture(file_path)
-           if self.camera.isOpened():
-                print(f"Video file {file_path} opened successfully.")
-           else:
-                print("Failed to open selected video.")
-                self.camera = None
-            
+    def update_file_video(self):
+        if self.cap_LH and self.cap_LH.isOpened():
+            ret, frame = self.cap_LH.read()
+            if ret:
+                frame = cv2.flip(frame,1)  
+                self.display_frame(frame, self.video_label_LH)
+                
+                if self.model is not None:
+                    results = self.model.predict(frame, imgsz=640, conf=0.5, verbose=False)
+                    frame = results[0].plot()  # draw bboxes
+                    self.display_frame(frame, self.video_label_LH)
+            else:
+                print("Failed to read frame.")
+                self.timer_LH.stop()
         else:
-            print("No file selected.")
+            print("Fail to read frame")
 
 
+        print("Model device:", next(self.model.model.parameters()).device) #Check Device that's model running on
+            
+       
     def display_frame(self, frame, label_widget):
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = frame.shape
         bytes_per_line = ch * w
         qimg = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qimg).scaled(
-            label_widget.width(),
-            label_widget.height(),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation
-        )
+        label_widget.size(),
+        Qt.IgnoreAspectRatio,
+        Qt.SmoothTransformation
+    )
         label_widget.setPixmap(pixmap)
 
     def load_yolo_model(self):
@@ -248,7 +329,6 @@ class MainWindow(QMainWindow):
         self.comboBox_2.setItemText(0, _tr("MainWindow", "640A-R"))
         self.comboBox_2.setItemText(1, _tr("MainWindow", "..."))
         self.label_4.setText(_tr("MainWindow", "Model :"))
-        self.StartButton.setText(_tr("MainWindow", "Start Detect"))
         self.menuYOLO_model.setTitle(_tr("MainWindow", "YOLO model"))
         self.menuSetting.setTitle(_tr("MainWindow", "Setting"))
 
